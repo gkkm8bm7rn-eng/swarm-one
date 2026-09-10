@@ -1,6 +1,7 @@
-const APP_VERSION = "0.7.2";
+const APP_VERSION = "0.8.0";
 const MODEL_ID = "Qwen2.5-0.5B-Instruct-q4f16_1-MLC";
 const WEBLLM_URL = "https://esm.run/@mlc-ai/web-llm@0.2.85";
+const VISION_MODEL_ID = "HuggingFaceTB/SmolVLM-256M-Instruct";
 const BLIND_MEMORY_TYPES = new Set(["FACT", "REQUIREMENT", "PREFERENCE"]);
 const MAX_MEMORY_ITEMS = 200;
 const MAX_CHAT_MESSAGES = 120;
@@ -36,6 +37,13 @@ let modelLoading = false;
 let modelReady = false;
 let cancelRequested = false;
 let pendingAttachments = [];
+let visionWorker = null;
+let visionReady = false;
+let visionLoading = false;
+let visionLoadPromise = null;
+let visionLoadResolve = null;
+let visionLoadReject = null;
+const visionRequests = new Map();
 
 const els = {
   runtimeLabel: $("runtimeLabel"), statusButton: $("statusButton"), statusDot: $("statusDot"), statusText: $("statusText"),
@@ -356,55 +364,200 @@ async function buildAttachmentText() {
   return blocks.join("\n\n");
 }
 
+
+function blobToDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("IMAGE_READ_FAILED"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function getVisionWorker() {
+  if (visionWorker) return visionWorker;
+  visionWorker = new Worker("./vision-worker.js?v=0.8.0", { type: "module" });
+  visionWorker.addEventListener("message", (event) => {
+    const msg = event.data || {};
+    if (msg.status === "loading") {
+      visionLoading = true;
+      setRun("Vision: загружаю сенсор изображения", 12, 0, 3);
+      return;
+    }
+    if (msg.status === "initiate" || msg.status === "progress" || msg.status === "done") {
+      const raw = Number(msg.progress);
+      const pct = Number.isFinite(raw) ? (raw <= 1 ? raw * 100 : raw) : 20;
+      setRun(`Vision: подготовка модели${msg.file ? ` · ${msg.file}` : ""}`, Math.max(12, Math.min(55, 12 + pct * 0.43)), 0, 3);
+      return;
+    }
+    if (msg.status === "ready") {
+      visionReady = true;
+      visionLoading = false;
+      if (visionLoadResolve) visionLoadResolve(true);
+      visionLoadResolve = null;
+      visionLoadReject = null;
+      toast("Vision готов");
+      return;
+    }
+    if (msg.status === "complete" && msg.requestId) {
+      const item = visionRequests.get(msg.requestId);
+      if (item) {
+        clearTimeout(item.timeout);
+        visionRequests.delete(msg.requestId);
+        item.resolve(String(msg.output || "").trim());
+      }
+      return;
+    }
+    if (msg.status === "error") {
+      const error = new Error(msg.data || "VISION_ERROR");
+      if (msg.requestId && visionRequests.has(msg.requestId)) {
+        const item = visionRequests.get(msg.requestId);
+        clearTimeout(item.timeout);
+        visionRequests.delete(msg.requestId);
+        item.reject(error);
+      } else if (visionLoadReject) {
+        visionLoadReject(error);
+        visionLoadPromise = null;
+        visionLoadResolve = null;
+        visionLoadReject = null;
+      }
+      visionLoading = false;
+    }
+  });
+  visionWorker.addEventListener("error", (event) => {
+    console.error("Vision worker error", event);
+    const error = new Error(event.message || "VISION_WORKER_ERROR");
+    if (visionLoadReject) visionLoadReject(error);
+    visionLoadPromise = null;
+    visionLoadResolve = null;
+    visionLoadReject = null;
+    visionLoading = false;
+  });
+  visionWorker.postMessage({ type: "check" });
+  return visionWorker;
+}
+
+async function ensureVision() {
+  if (visionReady) return true;
+  if (visionLoadPromise) return visionLoadPromise;
+  visionLoading = true;
+  const worker = getVisionWorker();
+  visionLoadPromise = new Promise((resolve, reject) => {
+    visionLoadResolve = resolve;
+    visionLoadReject = reject;
+    worker.postMessage({ type: "load" });
+  });
+  return visionLoadPromise;
+}
+
+async function askVision(prompt, blob) {
+  await ensureVision();
+  const image = await blobToDataURL(blob);
+  const requestId = uid();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      visionRequests.delete(requestId);
+      reject(new Error("VISION_TIMEOUT"));
+    }, 180000);
+    visionRequests.set(requestId, { resolve, reject, timeout });
+    getVisionWorker().postMessage({ type: "generate", data: { requestId, prompt, image } });
+  });
+}
+
+async function buildVisionEvidence(task, imageItems) {
+  if (!imageItems.length) return "";
+  if (!modelReady) {
+    setRun("Подготавливаю основную модель для работы с Vision", 5, 0, 3);
+    await ensureEngine();
+  }
+  const englishTask = await callModel(
+    "Ты служебный переводчик для Vision-модуля. Переведи запрос пользователя на краткий точный английский. Не отвечай на сам запрос, только переведи его.",
+    task,
+    { maxTokens: 120, temperature: 0 }
+  );
+  await ensureVision();
+  const outputs = [];
+  const selected = imageItems.slice(0, 2);
+  for (let i = 0; i < selected.length; i++) {
+    const item = selected[i];
+    setRun(`Vision: анализ изображения ${i + 1}/${selected.length}`, 58 + i * 12, 1, 3);
+    const prompt = `Act as a factual visual sensor. User question: ${englishTask}\nDescribe only visible evidence relevant to the question. Include objects, composition, colors, layout, and legible text when possible. If something is uncertain, say so. Do not invent context outside the image.`;
+    const evidence = await askVision(prompt, item.blob);
+    outputs.push(`[VISION ${i + 1}: ${item.name}]\n${evidence || "No reliable visual evidence returned."}`);
+  }
+  if (imageItems.length > 2) {
+    outputs.push(`[VISION LIMIT]\nПроанализированы первые 2 изображения из ${imageItems.length}, чтобы не перегружать память iPhone.`);
+  }
+  return `ВИЗУАЛЬНЫЕ ДАННЫЕ ОТ ОТДЕЛЬНОГО VISION-СЕНСОРА (могут быть на английском; это наблюдения, а не финальный вывод):\n${outputs.join("\n\n")}`;
+}
+
 function attachmentSummary() {
   if (!pendingAttachments.length) return "";
   return `\n\nВложения: ${pendingAttachments.map((f) => {
-    if (f.kind === "image") return `${f.name} (изображение; Vision пока не подключён)`;
+    if (f.kind === "image") return `${f.name} (изображение)`;
     return `${f.name}${f.supported ? "" : " (не извлечено)"}`;
   }).join(", ")}`;
 }
 
 async function submitPrompt(prefill) {
   const task = (prefill ?? els.promptInput.value).trim();
-  if (!task || modelLoading) return;
-  const hasImages = pendingAttachments.some((f) => f.kind === "image");
+  if (!task || modelLoading || visionLoading) return;
+  const imageItems = pendingAttachments.filter((f) => f.kind === "image" && f.blob);
+  const hasImages = imageItems.length > 0;
   const visible = `${task}${attachmentSummary()}`;
-  const attachments = await buildAttachmentText();
+  const textAttachments = await buildAttachmentText();
   state.chats.push({ id: uid(), role: "user", text: visible, ts: nowIso() });
-  await saveState(); renderMessages();
-  els.promptInput.value = ""; autosize();
-  const oldAttachments = pendingAttachments;
-  pendingAttachments = []; renderAttachments();
+  await saveState();
+  renderMessages();
+  els.promptInput.value = "";
+  autosize();
+  const oldAttachments = [...pendingAttachments];
+  pendingAttachments = [];
+  renderAttachments();
   els.sendButton.disabled = true;
   try {
+    let attachments = textAttachments;
     if (hasImages) {
-      const text = "Изображение принято и локально подготовлено, но текущая офлайн-модель SWARM — текстовая и ещё не умеет видеть содержимое фотографии. Я не буду делать вид, что проанализировал изображение. Vision подключим отдельной локальной моделью после проверки её устойчивости на iPhone.";
-      state.chats.push({ id: uid(), role: "assistant", text, ts: nowIso(), report: "Vision: не запускался · изображение не отправлялось наружу" });
-      state.ledger.push({ id: uid(), ts: nowIso(), status: "blocked", mode: "vision", taskSummary: task.slice(0,180), finalSummary: text, verificationScope: "none", unresolvedRisk: "Vision model not installed", nextAction: "prepare local vision model" });
-      await saveState(); renderMessages();
-      return;
+      const visionEvidence = await buildVisionEvidence(task, imageItems);
+      attachments = [attachments, visionEvidence].filter(Boolean).join("\n\n");
     }
     const result = modelReady ? await runSwarm(task, attachments) : demoResponse(task);
-    const report = `Режим: ${modePlan[result.mode].label} · blind-кандидатов: ${result.candidates.length || 0} · проверка: ${result.verification ? "да" : "нет"}${result.risks?.length ? ` · риски: ${result.risks.length}` : ""}`;
+    const report = `Режим: ${modePlan[result.mode].label} · blind-кандидатов: ${result.candidates.length || 0} · проверка: ${result.verification ? "да" : "нет"}${hasImages ? " · Vision: да" : ""}${result.risks?.length ? ` · риски: ${result.risks.length}` : ""}`;
     state.chats.push({ id: uid(), role: "assistant", text: result.final, ts: nowIso(), report, demo: !!result.demo });
     state.ledger.push({
-      id: uid(), ts: nowIso(), status: result.demo ? "demo" : "complete", mode: result.mode,
-      taskSummary: task.slice(0, 180), finalSummary: result.final.slice(0, 320),
-      verificationScope: result.demo ? "none" : "local logic/math/source consistency; no external web verification",
+      id: uid(),
+      ts: nowIso(),
+      status: result.demo ? "demo" : "complete",
+      mode: result.mode,
+      taskSummary: task.slice(0, 180),
+      finalSummary: result.final.slice(0, 320),
+      verificationScope: result.demo ? "none" : `local logic/math/source consistency${hasImages ? "; SmolVLM visual sensor" : ""}; no external web verification`,
       unresolvedRisk: result.risks?.join(" ") || "",
       nextAction: result.demo ? "prepare local model" : "",
     });
-    if (!result.demo) await addAudit({ type: "swarm_run", mode: result.mode, task: task.slice(0, 2000), internal: result });
-    await saveState(); renderMessages();
+    if (!result.demo) {
+      await addAudit({ type: "swarm_run", mode: result.mode, task: task.slice(0, 2000), usedVision: hasImages, internal: result });
+    }
+    await saveState();
+    renderMessages();
   } catch (err) {
     console.error(err);
     const cancelled = String(err?.message || err).includes("CANCELLED");
-    state.chats.push({ id: uid(), role: "assistant", text: cancelled ? "Запуск остановлен. Незавершённый внутренний результат не использован." : `Локальный запуск завершился ошибкой: ${err?.message || err}`, ts: nowIso() });
-    await saveState(); renderMessages();
+    const visionFailure = /VISION|SmolVLM|transformers/i.test(String(err?.message || err));
+    const text = cancelled
+      ? "Запуск остановлен. Незавершённый внутренний результат не использован."
+      : visionFailure
+        ? `Vision не смог завершить анализ на этом устройстве: ${err?.message || err}. Изображение не было подменено догадкой.`
+        : `Локальный запуск завершился ошибкой: ${err?.message || err}`;
+    state.chats.push({ id: uid(), role: "assistant", text, ts: nowIso() });
+    await saveState();
+    renderMessages();
   } finally {
     els.runPanel.classList.add("hidden");
     els.sendButton.disabled = false;
-    oldAttachments.length = 0;
+    for (const f of oldAttachments) {
+      if (f.previewUrl) URL.revokeObjectURL(f.previewUrl);
+    }
   }
 }
 
@@ -457,8 +610,8 @@ async function handleFiles(files) {
       }
       try {
         const normalized = await normalizeImage(file);
-        pendingAttachments.push({ id: uid(), kind: "image", name: file.name, size: normalized.blob.size, originalSize: file.size, width: normalized.width, height: normalized.height, supported: false, text: "", previewUrl: normalized.objectUrl });
-        toast(`${file.name}: фото подготовлено локально (${normalized.width}×${normalized.height}). Vision пока не подключён.`, 3600);
+        pendingAttachments.push({ id: uid(), kind: "image", name: file.name, size: normalized.blob.size, originalSize: file.size, width: normalized.width, height: normalized.height, supported: false, text: "", blob: normalized.blob, previewUrl: normalized.objectUrl });
+        toast(`${file.name}: фото подготовлено (${normalized.width}×${normalized.height}). Vision запустится при отправке.`, 3600);
       } catch {
         pendingAttachments.push({ id: uid(), kind: "image", name: file.name, size: file.size, supported: false, text: "" });
         toast(`${file.name}: не удалось декодировать изображение`, 3600);
@@ -522,8 +675,8 @@ async function ensureEngine() {
     engine = await modelModule.CreateMLCEngine(MODEL_ID, { initProgressCallback, logLevel: "WARN" }, { context_window_size: 2048 });
     modelReady = true;
     els.downloadProgress.querySelector("span").style.width = "100%";
-    els.modelNote.textContent = "Модель готова. Теперь проверь работу в авиарежиме после полного закрытия приложения.";
-    toast("Офлайн-модель готова");
+    els.modelNote.textContent = "Основная модель готова. Полный офлайн-тест оставлен на отдельный этап.";
+    toast("Основная модель готова");
     await addAudit({ type: "model_ready", model: MODEL_ID, appVersion: APP_VERSION });
   } finally {
     modelLoading = false;
@@ -571,6 +724,7 @@ async function showStatus() {
   const rows = [
     ["Версия", APP_VERSION], ["Режим", state.settings.localOnly ? "только локально" : "локально + будущие адаптеры"],
     ["WebGPU", "gpu" in navigator ? "доступен" : "нет"], ["Модель", modelReady ? MODEL_ID : "не загружена"],
+    ["Vision", visionReady ? VISION_MODEL_ID : (visionLoading ? "загружается" : "по требованию")],
     ["Хранилище", persistent ? "persistent" : "browser managed"], ["Сеть", navigator.onLine ? "доступна" : "офлайн"],
     ["Память Context Capsule", `${state.memory.length} записей`], ["Ledger", `${state.ledger.length} записей`],
   ];

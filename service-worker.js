@@ -1,9 +1,10 @@
-const VERSION = "swarm-one-v0.7.2";
+const VERSION = "swarm-one-v0.8.0";
 const SHELL = [
   "./",
   "./index.html",
   "./styles.css",
-  "./app.js?v=0.7.2",
+  "./app.js?v=0.8.0",
+  "./vision-worker.js?v=0.8.0",
   "./manifest.webmanifest",
   "./assets/icon.svg",
   "./assets/icon-180.png",
