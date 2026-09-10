@@ -1,4 +1,4 @@
-const APP_VERSION = "0.8.0";
+const APP_VERSION = "0.8.1";
 const MODEL_ID = "Qwen2.5-0.5B-Instruct-q4f16_1-MLC";
 const WEBLLM_URL = "https://esm.run/@mlc-ai/web-llm@0.2.85";
 const VISION_MODEL_ID = "HuggingFaceTB/SmolVLM-256M-Instruct";
@@ -466,29 +466,27 @@ async function askVision(prompt, blob) {
 
 async function buildVisionEvidence(task, imageItems) {
   if (!imageItems.length) return "";
-  if (!modelReady) {
-    setRun("Подготавливаю основную модель для работы с Vision", 5, 0, 3);
-    await ensureEngine();
+  try {
+    await ensureVision();
+  } catch (err) {
+    throw new Error(`VISION_LOAD_FAILED: ${err?.message || err}`);
   }
-  const englishTask = await callModel(
-    "Ты служебный переводчик для Vision-модуля. Переведи запрос пользователя на краткий точный английский. Не отвечай на сам запрос, только переведи его.",
-    task,
-    { maxTokens: 120, temperature: 0 }
-  );
-  await ensureVision();
   const outputs = [];
   const selected = imageItems.slice(0, 2);
   for (let i = 0; i < selected.length; i++) {
     const item = selected[i];
     setRun(`Vision: анализ изображения ${i + 1}/${selected.length}`, 58 + i * 12, 1, 3);
-    const prompt = `Act as a factual visual sensor. User question: ${englishTask}\nDescribe only visible evidence relevant to the question. Include objects, composition, colors, layout, and legible text when possible. If something is uncertain, say so. Do not invent context outside the image.`;
-    const evidence = await askVision(prompt, item.blob);
-    outputs.push(`[VISION ${i + 1}: ${item.name}]\n${evidence || "No reliable visual evidence returned."}`);
+    const prompt = `Act as a factual visual sensor. The user asks in Russian: ${escapeForPrompt(task, 900)}\nAnswer in Russian if possible; otherwise use simple English. Describe only visible evidence relevant to the question. Include objects, composition, colors, layout, and legible text when possible. If something is uncertain, say so. Do not invent context outside the image.`;
+    let evidence;
+    try {
+      evidence = await askVision(prompt, item.blob);
+    } catch (err) {
+      throw new Error(`VISION_INFERENCE_FAILED: ${err?.message || err}`);
+    }
+    outputs.push(`[VISION ${i + 1}: ${item.name}]\n${evidence || "Vision не вернул надёжного описания."}`);
   }
-  if (imageItems.length > 2) {
-    outputs.push(`[VISION LIMIT]\nПроанализированы первые 2 изображения из ${imageItems.length}, чтобы не перегружать память iPhone.`);
-  }
-  return `ВИЗУАЛЬНЫЕ ДАННЫЕ ОТ ОТДЕЛЬНОГО VISION-СЕНСОРА (могут быть на английском; это наблюдения, а не финальный вывод):\n${outputs.join("\n\n")}`;
+  if (imageItems.length > 2) outputs.push(`[VISION LIMIT]\nПроанализированы первые 2 изображения из ${imageItems.length}, чтобы не перегружать память iPhone.`);
+  return `ВИЗУАЛЬНЫЕ ДАННЫЕ ОТ ОТДЕЛЬНОГО VISION-СЕНСОРА:\n${outputs.join("\n\n")}`;
 }
 
 function attachmentSummary() {
@@ -521,7 +519,19 @@ async function submitPrompt(prefill) {
       const visionEvidence = await buildVisionEvidence(task, imageItems);
       attachments = [attachments, visionEvidence].filter(Boolean).join("\n\n");
     }
-    const result = modelReady ? await runSwarm(task, attachments) : demoResponse(task);
+    let result;
+    if (hasImages && !modelReady) {
+      result = {
+        mode: "s0",
+        final: `Vision-предпросмотр (основная текстовая модель пока не загружена):\n\n${visionEvidence}`,
+        candidates: [],
+        verification: "Vision sensor only; text swarm not started",
+        risks: ["Основная текстовая модель SWARM не запускалась; это прямой вывод Vision-сенсора."],
+        visionOnly: true,
+      };
+    } else {
+      result = modelReady ? await runSwarm(task, attachments) : demoResponse(task);
+    }
     const report = `Режим: ${modePlan[result.mode].label} · blind-кандидатов: ${result.candidates.length || 0} · проверка: ${result.verification ? "да" : "нет"}${hasImages ? " · Vision: да" : ""}${result.risks?.length ? ` · риски: ${result.risks.length}` : ""}`;
     state.chats.push({ id: uid(), role: "assistant", text: result.final, ts: nowIso(), report, demo: !!result.demo });
     state.ledger.push({
@@ -543,11 +553,11 @@ async function submitPrompt(prefill) {
   } catch (err) {
     console.error(err);
     const cancelled = String(err?.message || err).includes("CANCELLED");
-    const visionFailure = /VISION|SmolVLM|transformers/i.test(String(err?.message || err));
+    const visionFailure = /VISION|SmolVLM|transformers|load failed/i.test(String(err?.message || err));
     const text = cancelled
       ? "Запуск остановлен. Незавершённый внутренний результат не использован."
       : visionFailure
-        ? `Vision не смог завершить анализ на этом устройстве: ${err?.message || err}. Изображение не было подменено догадкой.`
+        ? `Vision не смог завершить анализ: ${err?.message || err}. Изображение не было подменено догадкой. Ошибка сохранена для диагностики.`
         : `Локальный запуск завершился ошибкой: ${err?.message || err}`;
     state.chats.push({ id: uid(), role: "assistant", text, ts: nowIso() });
     await saveState();
