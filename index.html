@@ -11,7 +11,7 @@
   <link rel="apple-touch-icon" href="./assets/icon-180.png" />
   <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="./styles.css" />
-  <title>SWARM One · v0.8.1</title>
+  <title>SWARM One · v0.8.2</title>
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -19,7 +19,7 @@
       <div class="brand-wrap">
         <div class="brand-mark" aria-hidden="true">S</div>
         <div>
-          <div class="brand-title">SWARM One</div>
+          <div class="brand-title">SWARM One <span id="devBadge" class="dev-badge">DEV</span></div>
           <div id="runtimeLabel" class="brand-subtitle">локальный режим</div>
         </div>
       </div>
@@ -94,6 +94,7 @@
           <div class="diag-row"><span>WebGPU</span><strong id="gpuReady">проверка</strong></div>
           <div class="diag-row"><span>Постоянное хранилище</span><strong id="persistReady">проверка</strong></div>
           <div class="diag-row"><span>Локальная модель</span><strong id="modelReady">не загружена</strong></div>
+          <div class="diag-row"><span>DEV Debug Bridge</span><strong id="debugReady">не подключён</strong></div>
         </div>
       </section>
 
@@ -129,6 +130,18 @@
             </div>
             <input id="reportToggle" type="checkbox" checked />
           </div>
+          <div class="settings-card">
+            <div>
+              <strong>DEV диагностика</strong>
+              <p>Временно отправляет технические события в закрытый по случайному коду канал. Фото и полный текст запроса автоматически не отправляются.</p>
+            </div>
+            <input id="debugTopicInput" class="search-input" type="password" autocomplete="off" placeholder="Код DEV-канала" />
+            <div class="quick-actions">
+              <button id="debugConnectButton" class="primary-small" type="button">Подключить</button>
+              <button id="debugDisconnectButton" class="ghost-button" type="button">Отключить</button>
+            </div>
+            <small id="debugNote" class="muted">Технические события сохраняются локально.</small>
+          </div>
           <div class="settings-card switch-row">
             <div>
               <strong>Только локально</strong>
@@ -148,7 +161,7 @@
         <textarea id="promptInput" rows="1" placeholder="Сообщение SWARM…" enterkeyhint="send"></textarea>
         <button id="sendButton" class="send-button" type="button" aria-label="Отправить">↑</button>
       </div>
-      <div class="composer-foot">Личные данные остаются на устройстве в локальном режиме.</div>
+      <div id="composerFoot" class="composer-foot">DEV MODE · технические события сохраняются локально.</div>
     </div>
 
     <nav class="bottom-nav" aria-label="Навигация">
@@ -173,6 +186,6 @@
     <div id="statusDetails" class="status-details"></div>
   </dialog>
 
-  <script type="module" src="./app.js?v=0.8.1"></script>
+  <script type="module" src="./app.js?v=0.8.2"></script>
 </body>
 </html>

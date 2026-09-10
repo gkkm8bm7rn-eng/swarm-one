@@ -7,7 +7,7 @@ import {
   env,
 } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.1";
 
-// SWARM Vision Sensor v0.8.0
+// SWARM Vision Sensor v0.8.2
 // This worker follows Hugging Face's SmolVLM WebGPU example, adapted for SWARM's
 // static PWA and one-image-at-a-time mobile memory budget.
 env.allowLocalModels = false;
@@ -26,24 +26,30 @@ function post(status, extra = {}) {
 async function getModel() {
   if (processor && model) return [processor, model];
   if (!loadPromise) {
-    post("loading", { data: "Загружаю лёгкий Vision-модуль…" });
-    loadPromise = Promise.all([
-      AutoProcessor.from_pretrained(MODEL_ID, {
-        progress_callback: (x) => self.postMessage(x),
-      }),
-      AutoModelForVision2Seq.from_pretrained(MODEL_ID, {
-        dtype: "fp32",
-        device: "webgpu",
-        progress_callback: (x) => self.postMessage(x),
-      }),
-    ]).then(([p, m]) => {
-      processor = p;
-      model = m;
+    loadPromise = (async () => {
+      try {
+        post("loading", { phase: "processor", data: "Vision: загружаю процессор изображения" });
+        processor = await AutoProcessor.from_pretrained(MODEL_ID, {
+          progress_callback: (x) => self.postMessage({ ...x, phase: "processor" }),
+        });
+      } catch (error) {
+        throw Object.assign(new Error(`PROCESSOR_LOAD_FAILED: ${error?.message || error}`), { phase: "processor" });
+      }
+      try {
+        post("loading", { phase: "model", data: "Vision: загружаю веса модели" });
+        model = await AutoModelForVision2Seq.from_pretrained(MODEL_ID, {
+          dtype: "fp32",
+          device: "webgpu",
+          progress_callback: (x) => self.postMessage({ ...x, phase: "model" }),
+        });
+      } catch (error) {
+        throw Object.assign(new Error(`MODEL_LOAD_FAILED: ${error?.message || error}`), { phase: "model" });
+      }
       post("ready", { modelId: MODEL_ID });
-      return [p, m];
-    }).catch((error) => {
+      return [processor, model];
+    })().catch((error) => {
       loadPromise = null;
-      post("error", { data: String(error?.message || error) });
+      post("error", { phase: error?.phase || "load", data: String(error?.message || error) });
       throw error;
     });
   }
@@ -61,10 +67,13 @@ async function check() {
 }
 
 async function generate({ requestId, prompt, image }) {
+  let phase = "model";
   try {
     stoppingCriteria.reset();
     const [p, m] = await getModel();
+    phase = "image_decode";
     const rawImage = await load_image(image);
+    phase = "preprocess";
     const messages = [{
       role: "user",
       content: [
@@ -86,6 +95,7 @@ async function generate({ requestId, prompt, image }) {
     });
 
     post("start", { requestId });
+    phase = "inference";
     await m.generate({
       ...inputs,
       do_sample: false,
@@ -97,7 +107,7 @@ async function generate({ requestId, prompt, image }) {
 
     post("complete", { requestId, output: output.trim() });
   } catch (error) {
-    post("error", { requestId, data: String(error?.message || error) });
+    post("error", { requestId, phase, data: `${String(phase).toUpperCase()}_FAILED: ${String(error?.message || error)}` });
   }
 }
 

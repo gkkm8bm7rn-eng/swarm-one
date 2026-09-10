@@ -1,4 +1,4 @@
-const APP_VERSION = "0.8.1";
+const APP_VERSION = "0.8.2";
 const MODEL_ID = "Qwen2.5-0.5B-Instruct-q4f16_1-MLC";
 const WEBLLM_URL = "https://esm.run/@mlc-ai/web-llm@0.2.85";
 const VISION_MODEL_ID = "HuggingFaceTB/SmolVLM-256M-Instruct";
@@ -11,6 +11,12 @@ const MAX_IMAGE_ATTACHMENT_BYTES = 25_000_000;
 const MAX_IMAGE_EDGE = 1600;
 const IMAGE_JPEG_QUALITY = 0.82;
 const MAX_ATTACHMENT_CHARS = 8_000;
+const DEV_MODE = true;
+const DEBUG_TOPIC_KEY = "swarm-dev-debug-topic";
+const DEBUG_BUFFER_KEY = "swarm-dev-debug-buffer";
+const DEBUG_ENDPOINT = "https://ntfy.sh";
+const MAX_DEBUG_BUFFER = 80;
+
 
 const $ = (id) => document.getElementById(id);
 const nowIso = () => new Date().toISOString();
@@ -44,6 +50,11 @@ let visionLoadPromise = null;
 let visionLoadResolve = null;
 let visionLoadReject = null;
 const visionRequests = new Map();
+let debugTopic = "";
+let debugSession = uid();
+let debugSeq = 0;
+let debugBuffer = [];
+
 
 const els = {
   runtimeLabel: $("runtimeLabel"), statusButton: $("statusButton"), statusDot: $("statusDot"), statusText: $("statusText"),
@@ -56,7 +67,112 @@ const els = {
   composerWrap: $("composerWrap"), attachmentStrip: $("attachmentStrip"), attachmentInput: $("attachmentInput"), promptInput: $("promptInput"), sendButton: $("sendButton"),
   memoryDialog: $("memoryDialog"), memoryForm: $("memoryForm"), memoryType: $("memoryType"), memoryText: $("memoryText"), saveMemoryButton: $("saveMemoryButton"),
   statusDialog: $("statusDialog"), statusClose: $("statusClose"), statusDetails: $("statusDetails"),
+  debugReady: $("debugReady"), debugTopicInput: $("debugTopicInput"), debugConnectButton: $("debugConnectButton"),
+  debugDisconnectButton: $("debugDisconnectButton"), debugNote: $("debugNote"), composerFoot: $("composerFoot"), devBadge: $("devBadge"),
 };
+
+function cleanDebugValue(value, depth = 0) {
+  if (depth > 3) return "[depth-limit]";
+  if (value == null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") return value.slice(0, 900);
+  if (Array.isArray(value)) return value.slice(0, 12).map((v) => cleanDebugValue(v, depth + 1));
+  if (typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value).slice(0, 24)) {
+      if (/token|secret|password|authorization|cookie/i.test(k)) continue;
+      out[k] = cleanDebugValue(v, depth + 1);
+    }
+    return out;
+  }
+  return String(value).slice(0, 900);
+}
+
+function loadDebugBuffer() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DEBUG_BUFFER_KEY) || "[]");
+    debugBuffer = Array.isArray(saved) ? saved.slice(-MAX_DEBUG_BUFFER) : [];
+  } catch {
+    debugBuffer = [];
+  }
+}
+
+function storeDebugBuffer(payload) {
+  debugBuffer.push(payload);
+  debugBuffer = debugBuffer.slice(-MAX_DEBUG_BUFFER);
+  try { localStorage.setItem(DEBUG_BUFFER_KEY, JSON.stringify(debugBuffer)); } catch {}
+}
+
+function bootstrapDebugBridge() {
+  loadDebugBuffer();
+  try {
+    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const fromHash = params.get("debug");
+    if (fromHash && /^[A-Za-z0-9_-]{20,64}$/.test(fromHash)) {
+      localStorage.setItem(DEBUG_TOPIC_KEY, fromHash);
+      history.replaceState(null, "", location.pathname + location.search);
+    }
+    const saved = localStorage.getItem(DEBUG_TOPIC_KEY) || "";
+    debugTopic = /^[A-Za-z0-9_-]{20,64}$/.test(saved) ? saved : "";
+  } catch {
+    debugTopic = "";
+  }
+}
+
+async function debugEvent(stage, details = {}, level = "info") {
+  if (!DEV_MODE) return;
+  const payload = {
+    type: "SWARM_DEV_EVENT",
+    version: APP_VERSION,
+    session: debugSession,
+    seq: ++debugSeq,
+    ts: nowIso(),
+    level,
+    stage,
+    online: navigator.onLine,
+    webgpu: "gpu" in navigator,
+    modelReady,
+    visionReady,
+    visibility: document.visibilityState,
+    memoryItems: state?.memory?.length || 0,
+    ledgerItems: state?.ledger?.length || 0,
+    ua: navigator.userAgent,
+    details: cleanDebugValue(details),
+  };
+  storeDebugBuffer(payload);
+  if (!debugTopic || !navigator.onLine) return;
+  let body = JSON.stringify(payload);
+  if (body.length > 3900) body = JSON.stringify({ ...payload, details: { truncated: true, preview: body.slice(0, 2600) } });
+  try {
+    const res = await fetch(`${DEBUG_ENDPOINT}/${debugTopic}`, {
+      method: "POST",
+      body,
+      keepalive: true,
+    });
+    if (!res.ok) console.warn("Debug bridge publish failed", res.status);
+  } catch (err) {
+    console.warn("Debug bridge unavailable", err);
+  }
+}
+
+function setDebugTopic(topic) {
+  const value = String(topic || "").trim();
+  if (!/^[A-Za-z0-9_-]{20,64}$/.test(value)) throw new Error("Некорректный код DEV-канала");
+  debugTopic = value;
+  localStorage.setItem(DEBUG_TOPIC_KEY, value);
+  if (els.debugTopicInput) els.debugTopicInput.value = value;
+  updateStatus();
+  updateDiagnostics();
+  void debugEvent("debug_bridge_connected", { source: "settings" });
+}
+
+function clearDebugTopic() {
+  void debugEvent("debug_bridge_disconnected", { source: "settings" });
+  debugTopic = "";
+  localStorage.removeItem(DEBUG_TOPIC_KEY);
+  if (els.debugTopicInput) els.debugTopicInput.value = "";
+  updateStatus();
+  updateDiagnostics();
+}
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -376,11 +492,13 @@ function blobToDataURL(blob) {
 
 function getVisionWorker() {
   if (visionWorker) return visionWorker;
-  visionWorker = new Worker("./vision-worker.js?v=0.8.0", { type: "module" });
+  visionWorker = new Worker(`./vision-worker.js?v=${APP_VERSION}`, { type: "module" });
+  void debugEvent("vision_worker_created", { workerVersion: APP_VERSION });
   visionWorker.addEventListener("message", (event) => {
     const msg = event.data || {};
     if (msg.status === "loading") {
       visionLoading = true;
+      void debugEvent("vision_load_stage", { phase: msg.phase || "loading", message: msg.data || "" });
       setRun("Vision: загружаю сенсор изображения", 12, 0, 3);
       return;
     }
@@ -397,6 +515,7 @@ function getVisionWorker() {
       visionLoadResolve = null;
       visionLoadReject = null;
       toast("Vision готов");
+      void debugEvent("vision_ready", { modelId: msg.modelId || VISION_MODEL_ID });
       return;
     }
     if (msg.status === "complete" && msg.requestId) {
@@ -410,6 +529,7 @@ function getVisionWorker() {
     }
     if (msg.status === "error") {
       const error = new Error(msg.data || "VISION_ERROR");
+      void debugEvent("vision_worker_reported_error", { phase: msg.phase || "unknown", requestId: msg.requestId || null, message: error.message }, "error");
       if (msg.requestId && visionRequests.has(msg.requestId)) {
         const item = visionRequests.get(msg.requestId);
         clearTimeout(item.timeout);
@@ -427,6 +547,7 @@ function getVisionWorker() {
   visionWorker.addEventListener("error", (event) => {
     console.error("Vision worker error", event);
     const error = new Error(event.message || "VISION_WORKER_ERROR");
+    void debugEvent("vision_worker_crash", { message: error.message, filename: event.filename || "", line: event.lineno || 0, col: event.colno || 0 }, "error");
     if (visionLoadReject) visionLoadReject(error);
     visionLoadPromise = null;
     visionLoadResolve = null;
@@ -454,12 +575,25 @@ async function askVision(prompt, blob) {
   await ensureVision();
   const image = await blobToDataURL(blob);
   const requestId = uid();
+  const started = performance.now();
+  void debugEvent("vision_inference_start", { requestId, imageBytes: blob?.size || 0, promptChars: String(prompt || "").length });
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       visionRequests.delete(requestId);
+      void debugEvent("vision_inference_timeout", { requestId, elapsedMs: Math.round(performance.now() - started) }, "error");
       reject(new Error("VISION_TIMEOUT"));
     }, 180000);
-    visionRequests.set(requestId, { resolve, reject, timeout });
+    visionRequests.set(requestId, {
+      resolve: (value) => {
+        void debugEvent("vision_inference_complete", { requestId, elapsedMs: Math.round(performance.now() - started), outputChars: String(value || "").length });
+        resolve(value);
+      },
+      reject: (error) => {
+        void debugEvent("vision_inference_rejected", { requestId, elapsedMs: Math.round(performance.now() - started), message: error?.message || String(error) }, "error");
+        reject(error);
+      },
+      timeout,
+    });
     getVisionWorker().postMessage({ type: "generate", data: { requestId, prompt, image } });
   });
 }
@@ -469,6 +603,7 @@ async function buildVisionEvidence(task, imageItems) {
   try {
     await ensureVision();
   } catch (err) {
+    void debugEvent("vision_load_failed", { message: err?.message || String(err), stack: err?.stack || "" }, "error");
     throw new Error(`VISION_LOAD_FAILED: ${err?.message || err}`);
   }
   const outputs = [];
@@ -481,6 +616,7 @@ async function buildVisionEvidence(task, imageItems) {
     try {
       evidence = await askVision(prompt, item.blob);
     } catch (err) {
+      void debugEvent("vision_inference_failed", { imageIndex: i, imageName: item.name, message: err?.message || String(err), stack: err?.stack || "" }, "error");
       throw new Error(`VISION_INFERENCE_FAILED: ${err?.message || err}`);
     }
     outputs.push(`[VISION ${i + 1}: ${item.name}]\n${evidence || "Vision не вернул надёжного описания."}`);
@@ -504,6 +640,7 @@ async function submitPrompt(prefill) {
   const hasImages = imageItems.length > 0;
   const visible = `${task}${attachmentSummary()}`;
   const textAttachments = await buildAttachmentText();
+  void debugEvent("prompt_submit", { taskChars: task.length, imageCount: imageItems.length, textAttachmentChars: textAttachments.length, modelReady });
   state.chats.push({ id: uid(), role: "user", text: visible, ts: nowIso() });
   await saveState();
   renderMessages();
@@ -515,8 +652,9 @@ async function submitPrompt(prefill) {
   els.sendButton.disabled = true;
   try {
     let attachments = textAttachments;
+    let visionEvidence = "";
     if (hasImages) {
-      const visionEvidence = await buildVisionEvidence(task, imageItems);
+      visionEvidence = await buildVisionEvidence(task, imageItems);
       attachments = [attachments, visionEvidence].filter(Boolean).join("\n\n");
     }
     let result;
@@ -550,14 +688,16 @@ async function submitPrompt(prefill) {
     }
     await saveState();
     renderMessages();
+    void debugEvent("prompt_complete", { mode: result.mode, hasImages, visionOnly: !!result.visionOnly, finalChars: result.final?.length || 0 });
   } catch (err) {
     console.error(err);
+    void debugEvent("prompt_failed", { message: err?.message || String(err), stack: err?.stack || "", hasImages, modelReady, visionReady }, "error");
     const cancelled = String(err?.message || err).includes("CANCELLED");
     const visionFailure = /VISION|SmolVLM|transformers|load failed/i.test(String(err?.message || err));
     const text = cancelled
       ? "Запуск остановлен. Незавершённый внутренний результат не использован."
       : visionFailure
-        ? `Vision не смог завершить анализ: ${err?.message || err}. Изображение не было подменено догадкой. Ошибка сохранена для диагностики.`
+        ? `Vision не смог завершить анализ: ${err?.message || err}. Изображение не было подменено догадкой. DEV-диагностика записала этап ошибки.`
         : `Локальный запуск завершился ошибкой: ${err?.message || err}`;
     state.chats.push({ id: uid(), role: "assistant", text, ts: nowIso() });
     await saveState();
@@ -675,23 +815,43 @@ async function ensureEngine() {
   els.downloadProgress.querySelector("span").style.width = "2%";
   els.modelNote.textContent = "Загружаю WebLLM и модель. На первом запуске это может занять несколько минут.";
   updateStatus();
+  void debugEvent("text_model_load_start", { modelId: MODEL_ID, library: WEBLLM_URL });
   try {
-    modelModule = modelModule || await import(WEBLLM_URL);
+    try {
+      modelModule = modelModule || await import(WEBLLM_URL);
+      void debugEvent("webllm_library_ready", { library: WEBLLM_URL });
+    } catch (err) {
+      void debugEvent("webllm_library_failed", { library: WEBLLM_URL, message: err?.message || String(err), stack: err?.stack || "" }, "error");
+      throw err;
+    }
+    let lastBucket = -1;
     const initProgressCallback = (report) => {
       const p = Number.isFinite(report?.progress) ? Math.round(report.progress * 100) : 5;
       els.downloadProgress.querySelector("span").style.width = `${Math.max(2, Math.min(100, p))}%`;
       els.modelNote.textContent = report?.text || `Подготовка модели: ${p}%`;
+      const bucket = Math.floor(p / 25);
+      if (bucket !== lastBucket) {
+        lastBucket = bucket;
+        void debugEvent("text_model_progress", { progress: p, text: report?.text || "" });
+      }
     };
-    engine = await modelModule.CreateMLCEngine(MODEL_ID, { initProgressCallback, logLevel: "WARN" }, { context_window_size: 2048 });
+    try {
+      engine = await modelModule.CreateMLCEngine(MODEL_ID, { initProgressCallback, logLevel: "WARN" }, { context_window_size: 2048 });
+    } catch (err) {
+      void debugEvent("text_model_engine_failed", { modelId: MODEL_ID, message: err?.message || String(err), stack: err?.stack || "" }, "error");
+      throw err;
+    }
     modelReady = true;
     els.downloadProgress.querySelector("span").style.width = "100%";
     els.modelNote.textContent = "Основная модель готова. Полный офлайн-тест оставлен на отдельный этап.";
     toast("Основная модель готова");
     await addAudit({ type: "model_ready", model: MODEL_ID, appVersion: APP_VERSION });
+    void debugEvent("text_model_ready", { modelId: MODEL_ID });
   } finally {
     modelLoading = false;
     els.prepareModelButton.disabled = false;
-    updateStatus(); updateDiagnostics();
+    updateStatus();
+    updateDiagnostics();
   }
   return engine;
 }
@@ -711,6 +871,8 @@ async function updateDiagnostics() {
   els.gpuReady.textContent = "gpu" in navigator ? "доступен" : "нет";
   els.persistReady.textContent = (await isPersistentStorage()) ? "persistent" : "обычное";
   els.modelReady.textContent = modelReady ? "готова" : "не загружена";
+  if (els.debugReady) els.debugReady.textContent = debugTopic ? `подключён · ${debugBuffer.length} событий` : `не подключён · ${debugBuffer.length} локальных`;
+  if (els.debugNote) els.debugNote.textContent = debugTopic ? "Технические события отправляются в DEV-канал и остаются в локальном буфере." : "Технические события сохраняются локально; удалённый DEV-канал не подключён.";
 }
 
 function updateStatus() {
@@ -726,7 +888,9 @@ function updateStatus() {
   } else {
     els.statusText.textContent = "Нужна модель";
   }
-  els.runtimeLabel.textContent = navigator.onLine ? "локальный режим · сеть доступна" : "локальный режим · офлайн";
+  els.runtimeLabel.textContent = `${debugTopic ? "DEV · " : ""}${navigator.onLine ? "локальный режим · сеть доступна" : "локальный режим · офлайн"}`;
+  if (els.devBadge) els.devBadge.classList.toggle("hidden", !DEV_MODE);
+  if (els.composerFoot) els.composerFoot.textContent = debugTopic ? "DEV MODE · техническая диагностика подключена; фото и полный текст запроса автоматически не отправляются." : "DEV MODE · технические события сохраняются локально.";
 }
 
 async function showStatus() {
@@ -737,6 +901,7 @@ async function showStatus() {
     ["Vision", visionReady ? VISION_MODEL_ID : (visionLoading ? "загружается" : "по требованию")],
     ["Хранилище", persistent ? "persistent" : "browser managed"], ["Сеть", navigator.onLine ? "доступна" : "офлайн"],
     ["Память Context Capsule", `${state.memory.length} записей`], ["Ledger", `${state.ledger.length} записей`],
+    ["DEV Debug Bridge", debugTopic ? `подключён · ${debugBuffer.length} событий` : `не подключён · ${debugBuffer.length} локальных`],
   ];
   els.statusDetails.replaceChildren();
   for (const [a,b] of rows) {
@@ -831,12 +996,22 @@ function bindEvents() {
   });
   els.statusButton.addEventListener("click", showStatus);
   els.statusClose.addEventListener("click", () => els.statusDialog.close());
+  if (els.debugConnectButton) els.debugConnectButton.addEventListener("click", () => {
+    try { setDebugTopic(els.debugTopicInput?.value); toast("DEV-диагностика подключена"); }
+    catch (err) { toast(err?.message || String(err), 4200); }
+  });
+  if (els.debugDisconnectButton) els.debugDisconnectButton.addEventListener("click", () => { clearDebugTopic(); toast("DEV-диагностика отключена"); });
+  window.addEventListener("error", (e) => { void debugEvent("window_error", { message: e.message || "", filename: e.filename || "", line: e.lineno || 0, col: e.colno || 0, stack: e.error?.stack || "" }, "error"); });
+  window.addEventListener("unhandledrejection", (e) => { void debugEvent("unhandled_rejection", { reason: e.reason?.message || String(e.reason || ""), stack: e.reason?.stack || "" }, "error"); });
   window.addEventListener("online", updateStatus); window.addEventListener("offline", updateStatus);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { updateStatus(); updateDiagnostics(); } });
 }
 
 async function init() {
+  bootstrapDebugBridge();
   bindEvents(); autosize();
+  if (els.debugTopicInput) els.debugTopicInput.value = debugTopic;
+  void debugEvent("app_init_start", { secureContext: window.isSecureContext, language: navigator.language || "" });
   try {
     db = await openDB();
     const saved = await idbGet("kv", "state");
@@ -847,6 +1022,7 @@ async function init() {
   applySettings(); renderMessages(); renderMemory(); updateStatus(); updateDiagnostics();
   await registerServiceWorker();
   setTimeout(updateDiagnostics, 900);
+  void debugEvent("app_init_complete", { serviceWorker: !!navigator.serviceWorker?.controller, persistentStorageSupported: !!navigator.storage?.persist });
 }
 
 init();
