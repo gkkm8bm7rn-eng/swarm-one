@@ -1,11 +1,14 @@
-const APP_VERSION = "0.7.1";
+const APP_VERSION = "0.7.2";
 const MODEL_ID = "Qwen2.5-0.5B-Instruct-q4f16_1-MLC";
 const WEBLLM_URL = "https://esm.run/@mlc-ai/web-llm@0.2.85";
 const BLIND_MEMORY_TYPES = new Set(["FACT", "REQUIREMENT", "PREFERENCE"]);
 const MAX_MEMORY_ITEMS = 200;
 const MAX_CHAT_MESSAGES = 120;
 const MAX_LEDGER_ITEMS = 100;
-const MAX_ATTACHMENT_BYTES = 1_500_000;
+const MAX_TEXT_ATTACHMENT_BYTES = 5_000_000;
+const MAX_IMAGE_ATTACHMENT_BYTES = 25_000_000;
+const MAX_IMAGE_EDGE = 1600;
+const IMAGE_JPEG_QUALITY = 0.82;
 const MAX_ATTACHMENT_CHARS = 8_000;
 
 const $ = (id) => document.getElementById(id);
@@ -355,12 +358,16 @@ async function buildAttachmentText() {
 
 function attachmentSummary() {
   if (!pendingAttachments.length) return "";
-  return `\n\nВложения: ${pendingAttachments.map((f) => `${f.name}${f.supported ? "" : " (не извлечено)"}`).join(", ")}`;
+  return `\n\nВложения: ${pendingAttachments.map((f) => {
+    if (f.kind === "image") return `${f.name} (изображение; Vision пока не подключён)`;
+    return `${f.name}${f.supported ? "" : " (не извлечено)"}`;
+  }).join(", ")}`;
 }
 
 async function submitPrompt(prefill) {
   const task = (prefill ?? els.promptInput.value).trim();
   if (!task || modelLoading) return;
+  const hasImages = pendingAttachments.some((f) => f.kind === "image");
   const visible = `${task}${attachmentSummary()}`;
   const attachments = await buildAttachmentText();
   state.chats.push({ id: uid(), role: "user", text: visible, ts: nowIso() });
@@ -370,6 +377,13 @@ async function submitPrompt(prefill) {
   pendingAttachments = []; renderAttachments();
   els.sendButton.disabled = true;
   try {
+    if (hasImages) {
+      const text = "Изображение принято и локально подготовлено, но текущая офлайн-модель SWARM — текстовая и ещё не умеет видеть содержимое фотографии. Я не буду делать вид, что проанализировал изображение. Vision подключим отдельной локальной моделью после проверки её устойчивости на iPhone.";
+      state.chats.push({ id: uid(), role: "assistant", text, ts: nowIso(), report: "Vision: не запускался · изображение не отправлялось наружу" });
+      state.ledger.push({ id: uid(), ts: nowIso(), status: "blocked", mode: "vision", taskSummary: task.slice(0,180), finalSummary: text, verificationScope: "none", unresolvedRisk: "Vision model not installed", nextAction: "prepare local vision model" });
+      await saveState(); renderMessages();
+      return;
+    }
     const result = modelReady ? await runSwarm(task, attachments) : demoResponse(task);
     const report = `Режим: ${modePlan[result.mode].label} · blind-кандидатов: ${result.candidates.length || 0} · проверка: ${result.verification ? "да" : "нет"}${result.risks?.length ? ` · риски: ${result.risks.length}` : ""}`;
     state.chats.push({ id: uid(), role: "assistant", text: result.final, ts: nowIso(), report, demo: !!result.demo });
@@ -400,21 +414,71 @@ function isTextFile(file) {
   return file.type.startsWith("text/") || file.type === "application/json" || allowed.has(ext);
 }
 
+function isImageFile(file) {
+  const ext = file.name.split(".").pop()?.toLowerCase();
+  return file.type.startsWith("image/") || new Set(["jpg","jpeg","png","webp","heic","heif"]).has(ext);
+}
+
+function canvasToBlob(canvas, type = "image/jpeg", quality = IMAGE_JPEG_QUALITY) {
+  return new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+}
+
+async function normalizeImage(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("IMAGE_DECODE_FAILED"));
+      el.src = url;
+    });
+    const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(img.naturalWidth, img.naturalHeight));
+    const width = Math.max(1, Math.round(img.naturalWidth * scale));
+    const height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) throw new Error("CANVAS_UNAVAILABLE");
+    ctx.drawImage(img, 0, 0, width, height);
+    const blob = await canvasToBlob(canvas);
+    if (!blob) throw new Error("IMAGE_ENCODE_FAILED");
+    return { width, height, blob, objectUrl: URL.createObjectURL(blob) };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function handleFiles(files) {
   for (const file of [...files].slice(0, 8)) {
-    if (file.size > MAX_ATTACHMENT_BYTES) {
-      toast(`${file.name}: больше 1,5 МБ — не добавлен`); continue;
-    }
-    if (!isTextFile(file)) {
-      pendingAttachments.push({ id: uid(), name: file.name, size: file.size, supported: false, text: "" });
+    if (isImageFile(file)) {
+      if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
+        toast(`${file.name}: фото больше 25 МБ — выбери обычную фотографию вместо RAW/очень большого файла`, 4200);
+        continue;
+      }
+      try {
+        const normalized = await normalizeImage(file);
+        pendingAttachments.push({ id: uid(), kind: "image", name: file.name, size: normalized.blob.size, originalSize: file.size, width: normalized.width, height: normalized.height, supported: false, text: "", previewUrl: normalized.objectUrl });
+        toast(`${file.name}: фото подготовлено локально (${normalized.width}×${normalized.height}). Vision пока не подключён.`, 3600);
+      } catch {
+        pendingAttachments.push({ id: uid(), kind: "image", name: file.name, size: file.size, supported: false, text: "" });
+        toast(`${file.name}: не удалось декодировать изображение`, 3600);
+      }
       continue;
     }
-    try {
-      const text = await file.text();
-      pendingAttachments.push({ id: uid(), name: file.name, size: file.size, supported: true, text });
-    } catch {
-      pendingAttachments.push({ id: uid(), name: file.name, size: file.size, supported: false, text: "" });
+    if (isTextFile(file)) {
+      if (file.size > MAX_TEXT_ATTACHMENT_BYTES) {
+        toast(`${file.name}: текстовый файл больше 5 МБ — не добавлен`); continue;
+      }
+      try {
+        const text = await file.text();
+        pendingAttachments.push({ id: uid(), kind: "text", name: file.name, size: file.size, supported: true, text });
+      } catch {
+        pendingAttachments.push({ id: uid(), kind: "text", name: file.name, size: file.size, supported: false, text: "" });
+      }
+      continue;
     }
+    pendingAttachments.push({ id: uid(), kind: "binary", name: file.name, size: file.size, supported: false, text: "" });
+    toast(`${file.name}: этот тип файла пока не обрабатывается`, 3200);
   }
   renderAttachments();
   els.attachmentInput.value = "";
@@ -424,9 +488,16 @@ function renderAttachments() {
   els.attachmentStrip.replaceChildren();
   for (const f of pendingAttachments) {
     const pill = document.createElement("span"); pill.className = "attachment-pill";
-    const txt = document.createElement("span"); txt.textContent = `${f.supported ? "▤" : "◻︎"} ${f.name}`;
+    const txt = document.createElement("span");
+    const icon = f.kind === "image" ? "▧" : (f.supported ? "▤" : "◻︎");
+    const suffix = f.kind === "image" && f.width ? ` · ${f.width}×${f.height}` : "";
+    txt.textContent = `${icon} ${f.name}${suffix}`;
     const rm = document.createElement("button"); rm.type = "button"; rm.textContent = "×";
-    rm.addEventListener("click", () => { pendingAttachments = pendingAttachments.filter((x) => x.id !== f.id); renderAttachments(); });
+    rm.addEventListener("click", () => {
+      if (f.previewUrl) URL.revokeObjectURL(f.previewUrl);
+      pendingAttachments = pendingAttachments.filter((x) => x.id !== f.id);
+      renderAttachments();
+    });
     pill.append(txt, rm); els.attachmentStrip.appendChild(pill);
   }
 }

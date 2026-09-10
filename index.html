@@ -11,7 +11,7 @@
   <link rel="apple-touch-icon" href="./assets/icon-180.png" />
   <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="./styles.css" />
-  <title>SWARM One · v0.7.1</title>
+  <title>SWARM One · v0.7.2</title>
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -144,7 +144,7 @@
       <div id="attachmentStrip" class="attachment-strip"></div>
       <div class="composer">
         <label class="attach-button" for="attachmentInput" aria-label="Прикрепить файл">＋</label>
-        <input id="attachmentInput" type="file" multiple hidden />
+        <input id="attachmentInput" type="file" accept="image/*,.txt,.md,.csv,.json,.html,.htm,.css,.js,.mjs,.ts,.tsx,.jsx,.py,.xml,.yaml,.yml,.log,.sql" multiple hidden />
         <textarea id="promptInput" rows="1" placeholder="Сообщение SWARM…" enterkeyhint="send"></textarea>
         <button id="sendButton" class="send-button" type="button" aria-label="Отправить">↑</button>
       </div>
@@ -173,6 +173,6 @@
     <div id="statusDetails" class="status-details"></div>
   </dialog>
 
-  <script type="module" src="./app.js?v=0.7.1"></script>
+  <script type="module" src="./app.js?v=0.7.2"></script>
 </body>
 </html>
