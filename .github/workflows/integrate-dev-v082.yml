@@ -1,0 +1,34 @@
+name: Integrate DEV diagnostics v0.8.2
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply v0.8.2 patch
+        run: python3 scripts/patch_dev_v082.py
+      - name: Validate
+        run: |
+          node --check app.js
+          node --check vision-worker.js
+          grep -q 'APP_VERSION = "0.8.2"' app.js
+          grep -q 'debugEvent("app_init_start"' app.js
+          grep -q 'let visionEvidence = ""' app.js
+          grep -q 'vision-worker.js?v=0.8.2' service-worker.js
+          grep -q 'DEV Debug Bridge' index.html
+      - name: Commit
+        run: |
+          rm -f .github/workflows/integrate-dev-v082.yml scripts/patch_dev_v082.py
+          git config user.name "SWARM One automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add app.js vision-worker.js index.html styles.css service-worker.js .github/workflows/integrate-dev-v082.yml scripts/patch_dev_v082.py
+          git commit -m "Add DEV Debug Bridge and harden Vision v0.8.2"
+          git push
