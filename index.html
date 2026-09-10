@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0f1222" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="SWARM One" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="./assets/icon-180.png" />
+  <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="./styles.css" />
+  <title>SWARM One · v0.7.1</title>
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="brand-wrap">
+        <div class="brand-mark" aria-hidden="true">S</div>
+        <div>
+          <div class="brand-title">SWARM One</div>
+          <div id="runtimeLabel" class="brand-subtitle">локальный режим</div>
+        </div>
+      </div>
+      <button id="statusButton" class="status-pill" type="button" aria-label="Состояние SWARM">
+        <span id="statusDot" class="status-dot"></span>
+        <span id="statusText">Проверка…</span>
+      </button>
+    </header>
+
+    <main class="main-area">
+      <section id="view-chat" class="view active" data-view="chat">
+        <div id="welcomeCard" class="welcome-card">
+          <div class="eyebrow">ТВОЙ ЛИЧНЫЙ РОЙ</div>
+          <h1>Чем займёмся?</h1>
+          <p>SWARM хранит твои рабочие правила локально и выбирает глубину проверки автоматически.</p>
+          <div class="quick-actions">
+            <button class="quick-chip" data-prompt="Перепроверь этот текст и улучши его, сохранив мой стиль.">✦ Улучшить текст</button>
+            <button class="quick-chip" data-prompt="Разбери задачу несколькими независимыми способами и сравни решения.">◫ Решить через рой</button>
+            <button class="quick-chip" data-prompt="Проверь расчёты и найди возможные ошибки.">✓ Проверить</button>
+          </div>
+        </div>
+
+        <div id="messages" class="messages" aria-live="polite"></div>
+
+        <div id="runPanel" class="run-panel hidden" aria-live="polite">
+          <div class="run-head">
+            <div>
+              <div class="run-title">SWARM работает</div>
+              <div id="runStage" class="run-stage">Маршрутизация задачи…</div>
+            </div>
+            <button id="stopButton" type="button" class="ghost-button">Стоп</button>
+          </div>
+          <div class="run-progress"><span id="runProgress"></span></div>
+          <div id="agentDots" class="agent-dots"></div>
+        </div>
+      </section>
+
+      <section id="view-memory" class="view" data-view="memory">
+        <div class="page-heading">
+          <div class="eyebrow">CONTEXT CAPSULE</div>
+          <h2>Что SWARM знает о работе с тобой</h2>
+          <p>Эти правила хранятся на устройстве и подаются агентам через Context Gate.</p>
+        </div>
+        <div class="memory-toolbar">
+          <input id="memorySearch" class="search-input" placeholder="Поиск по памяти" />
+          <button id="addMemoryButton" class="primary-small">Добавить</button>
+        </div>
+        <div id="memoryList" class="memory-list"></div>
+      </section>
+
+      <section id="view-vault" class="view" data-view="vault">
+        <div class="page-heading">
+          <div class="eyebrow">RECOVERY VAULT</div>
+          <h2>Резерв без подписок</h2>
+          <p>Экспортируй рабочую память и чаты одним файлом. Его можно хранить где угодно и вернуть в SWARM даже на другом устройстве.</p>
+        </div>
+        <div class="vault-grid">
+          <button id="exportButton" class="vault-card">
+            <span class="vault-icon">↗</span>
+            <strong>Экспорт Recovery Capsule</strong>
+            <small>Память, настройки, чаты и Ledger</small>
+          </button>
+          <label class="vault-card" for="importFile">
+            <span class="vault-icon">↘</span>
+            <strong>Импорт Recovery Capsule</strong>
+            <small>Восстановить SWARM из файла</small>
+            <input id="importFile" type="file" accept="application/json,.swarm" hidden />
+          </label>
+        </div>
+        <div class="diagnostic-card">
+          <div class="diag-row"><span>Оболочка приложения</span><strong id="shellReady">проверка</strong></div>
+          <div class="diag-row"><span>WebGPU</span><strong id="gpuReady">проверка</strong></div>
+          <div class="diag-row"><span>Постоянное хранилище</span><strong id="persistReady">проверка</strong></div>
+          <div class="diag-row"><span>Локальная модель</span><strong id="modelReady">не загружена</strong></div>
+        </div>
+      </section>
+
+      <section id="view-settings" class="view" data-view="settings">
+        <div class="page-heading">
+          <div class="eyebrow">НАСТРОЙКИ</div>
+          <h2>Как должен работать рой</h2>
+        </div>
+        <div class="settings-stack">
+          <div class="settings-card">
+            <label for="depthSelect">Глубина по умолчанию</label>
+            <select id="depthSelect">
+              <option value="auto">Авто</option>
+              <option value="s0">S0 · быстро</option>
+              <option value="s1">S1 · с проверкой</option>
+              <option value="s2">S2 · несколько мнений</option>
+              <option value="s3">S3 · полный рой</option>
+            </select>
+          </div>
+          <div class="settings-card">
+            <div>
+              <strong>Офлайн-модель</strong>
+              <p>Безопасный старт для iPhone: Qwen2.5 0.5B. Более тяжёлые модели можно включить позже после реального теста памяти.</p>
+            </div>
+            <button id="prepareModelButton" class="primary-button">Подготовить офлайн</button>
+            <div id="downloadProgress" class="download-progress hidden"><span></span></div>
+            <small id="modelNote" class="muted"></small>
+          </div>
+          <div class="settings-card switch-row">
+            <div>
+              <strong>Показывать отчёт роя</strong>
+              <p>Коротко: сколько агентов участвовало и что было перепроверено.</p>
+            </div>
+            <input id="reportToggle" type="checkbox" checked />
+          </div>
+          <div class="settings-card switch-row">
+            <div>
+              <strong>Только локально</strong>
+              <p>Запрещает будущим облачным адаптерам отправлять запросы наружу.</p>
+            </div>
+            <input id="localOnlyToggle" type="checkbox" checked />
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="composer-wrap" id="composerWrap">
+      <div id="attachmentStrip" class="attachment-strip"></div>
+      <div class="composer">
+        <label class="attach-button" for="attachmentInput" aria-label="Прикрепить файл">＋</label>
+        <input id="attachmentInput" type="file" multiple hidden />
+        <textarea id="promptInput" rows="1" placeholder="Сообщение SWARM…" enterkeyhint="send"></textarea>
+        <button id="sendButton" class="send-button" type="button" aria-label="Отправить">↑</button>
+      </div>
+      <div class="composer-foot">Личные данные остаются на устройстве в локальном режиме.</div>
+    </div>
+
+    <nav class="bottom-nav" aria-label="Навигация">
+      <button class="nav-item active" data-target="chat"><span>◉</span><small>Чат</small></button>
+      <button class="nav-item" data-target="memory"><span>◇</span><small>Память</small></button>
+      <button class="nav-item" data-target="vault"><span>▣</span><small>Резерв</small></button>
+      <button class="nav-item" data-target="settings"><span>⚙︎</span><small>Настройки</small></button>
+    </nav>
+  </div>
+
+  <dialog id="memoryDialog" class="modal">
+    <form method="dialog" id="memoryForm">
+      <div class="modal-head"><strong>Новое правило</strong><button value="cancel" class="close-button">×</button></div>
+      <label>Тип<select id="memoryType"><option>REQUIREMENT</option><option>PREFERENCE</option><option>FACT</option><option>DECISION</option><option>HYPOTHESIS</option><option>STALE</option></select></label>
+      <label>Текст<textarea id="memoryText" rows="5" required placeholder="Например: Перед выдачей результата обязательно перепроверять расчёты."></textarea></label>
+      <button id="saveMemoryButton" value="default" class="primary-button">Сохранить</button>
+    </form>
+  </dialog>
+
+  <dialog id="statusDialog" class="modal">
+    <div class="modal-head"><strong>Состояние SWARM</strong><button id="statusClose" class="close-button">×</button></div>
+    <div id="statusDetails" class="status-details"></div>
+  </dialog>
+
+  <script type="module" src="./app.js?v=0.7.1"></script>
+</body>
+</html>
