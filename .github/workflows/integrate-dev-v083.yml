@@ -1,18 +1,23 @@
 name: Integrate DEV diagnostics v0.8.3
+
 on:
   push:
     paths:
-      - '.github/workflows/integrate-dev-v083.yml'
+      - .github/workflows/integrate-dev-v083.yml
+
 permissions:
   contents: write
+
 jobs:
   integrate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Apply v0.8.3 patch
-        shell: python
+
+      - name: Apply patch
+        shell: bash
         run: |
+          python3 <<'PY'
           from pathlib import Path
 
           app = Path('app.js')
@@ -20,9 +25,7 @@ jobs:
           s = s.replace('const APP_VERSION = "0.8.2";', 'const APP_VERSION = "0.8.3";')
           s = s.replace('debugDisconnectButton: $("debugDisconnectButton"), debugNote: $("debugNote"), composerFoot: $("composerFoot"), devBadge: $("devBadge"),', 'debugDisconnectButton: $("debugDisconnectButton"), debugShareButton: $("debugShareButton"), debugNote: $("debugNote"), composerFoot: $("composerFoot"), devBadge: $("devBadge"),')
 
-          anchor = '''function clearDebugTopic() {
-  void debugEvent("debug_bridge_disconnected", { source: "settings" });
-  debugTopic = "";'''
+          anchor = 'function clearDebugTopic() {\n  void debugEvent("debug_bridge_disconnected", { source: "settings" });\n  debugTopic = "";'
           if anchor not in s:
               raise SystemExit('clearDebugTopic anchor not found')
 
@@ -59,7 +62,7 @@ jobs:
 '''
           s = s.replace(anchor, share_fn + anchor)
 
-          bind_anchor = '''  els.debugDisconnectButton?.addEventListener("click", () => clearDebugTopic());'''
+          bind_anchor = '  els.debugDisconnectButton?.addEventListener("click", () => clearDebugTopic());'
           if bind_anchor not in s:
               raise SystemExit('debug disconnect bind anchor not found')
           s = s.replace(bind_anchor, bind_anchor + '\n  els.debugShareButton?.addEventListener("click", () => shareDebugReport());')
@@ -78,10 +81,15 @@ jobs:
           idx.write_text(h)
 
           sw = Path('service-worker.js')
-          w = sw.read_text().replace('swarm-one-v0.8.2', 'swarm-one-v0.8.3').replace('./app.js?v=0.8.2', './app.js?v=0.8.3').replace('./vision-worker.js?v=0.8.2', './vision-worker.js?v=0.8.3')
+          w = sw.read_text()
+          w = w.replace('swarm-one-v0.8.2', 'swarm-one-v0.8.3')
+          w = w.replace('./app.js?v=0.8.2', './app.js?v=0.8.3')
+          w = w.replace('./vision-worker.js?v=0.8.2', './vision-worker.js?v=0.8.3')
           sw.write_text(w)
+          PY
 
       - name: Validate
+        shell: bash
         run: |
           node --check app.js
           node --check vision-worker.js
@@ -89,7 +97,9 @@ jobs:
           grep -q 'debugShareButton' app.js
           grep -q 'debugShareButton' index.html
           grep -q 'swarm-one-v0.8.3' service-worker.js
+
       - name: Commit and self-clean
+        shell: bash
         run: |
           git config user.name "SWARM One automation"
           git config user.email "actions@users.noreply.github.com"
